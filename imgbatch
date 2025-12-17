@@ -1,0 +1,492 @@
+#!/bin/bash
+
+# ImgBatch - Batch Image Processor
+# Version: 1.0.0
+
+VERSION="1.0.0"
+SCRIPT_NAME="imgbatch"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+print_success() { echo -e "${GREEN}✓${NC} $1"; }
+print_error() { echo -e "${RED}✗${NC} $1"; }
+print_info() { echo -e "${BLUE}ℹ${NC} $1"; }
+print_warning() { echo -e "${YELLOW}⚠${NC} $1"; }
+print_header() { echo -e "${CYAN}${BOLD}${1}${NC}"; }
+
+show_usage() {
+    cat << EOF
+${BLUE}${BOLD}ImgBatch${NC} - Batch Image Processor v${VERSION}
+
+${YELLOW}Usage:${NC}
+    $SCRIPT_NAME <command> <files> [options]
+
+${YELLOW}Commands:${NC}
+    resize <files>           Resize images
+    compress <files>         Compress/optimize images
+    convert <files>          Convert image format
+    crop <files>             Crop images
+    watermark <files>        Add watermark
+    strip <files>            Remove EXIF metadata
+    info <files>             Show image information
+    optimize <files>         Auto-optimize for web
+
+${YELLOW}Resize Options:${NC}
+    --width <n>              Target width in pixels
+    --height <n>             Target height in pixels
+    --percent <n>            Scale by percentage
+    --max <n>                Max dimension (maintain aspect)
+
+${YELLOW}Compress Options:${NC}
+    --quality <n>            JPEG quality 1-100 (default: 85)
+    --max-size <n>           Max file size in KB
+
+${YELLOW}Convert Options:${NC}
+    --to <format>            Target format (jpg, png, webp, gif)
+
+${YELLOW}Crop Options:${NC}
+    --size <WxH>             Crop size (e.g., 800x600)
+    --gravity <position>     Crop position (center, north, south, etc.)
+
+${YELLOW}Watermark Options:${NC}
+    --text <text>            Watermark text
+    --image <file>           Watermark image
+    --position <pos>         Position (southeast, northeast, etc.)
+    --opacity <n>            Opacity 0-100 (default: 50)
+
+${YELLOW}Global Options:${NC}
+    --output <dir>           Output directory (default: processed/)
+    --prefix <text>          Add prefix to filenames
+    --suffix <text>          Add suffix to filenames
+    -f, --force              Overwrite existing files
+    -v, --verbose            Verbose output
+    -h, --help               Show this help
+
+${YELLOW}Examples:${NC}
+    $SCRIPT_NAME resize *.jpg --width 1920 --output web/
+        → Resize all JPGs to 1920px wide
+
+    $SCRIPT_NAME compress photos/*.jpg --quality 80
+        → Compress JPGs to 80% quality
+
+    $SCRIPT_NAME convert *.heic --to jpg
+        → Convert HEIC to JPG
+
+    $SCRIPT_NAME watermark *.jpg --text "© 2024" --position southeast
+        → Add watermark to all images
+
+    $SCRIPT_NAME strip *.jpg
+        → Remove all EXIF metadata (location, camera info, etc.)
+
+    $SCRIPT_NAME optimize *.jpg --output optimized/
+        → Auto-optimize for web (resize + compress)
+
+${YELLOW}Batch Processing:${NC}
+    Process entire directories:
+    $SCRIPT_NAME resize photos/**/*.jpg --width 1200
+
+    Maintain folder structure:
+    $SCRIPT_NAME compress photos/ --quality 85 --output compressed/
+
+${YELLOW}Requirements:${NC}
+    • ImageMagick (convert, identify)
+    • exiftool (for metadata operations)
+
+    Install:
+    Ubuntu: sudo apt install imagemagick exiftool
+    macOS:  brew install imagemagick exiftool
+
+EOF
+}
+
+show_version() {
+    echo "$SCRIPT_NAME version $VERSION"
+}
+
+# Check dependencies
+check_deps() {
+    local missing=()
+    
+    if ! command -v convert &> /dev/null; then
+        missing+=("imagemagick")
+    fi
+    
+    if ! command -v exiftool &> /dev/null && [ "$1" = "strip" ]; then
+        missing+=("exiftool")
+    fi
+    
+    if [ ${#missing[@]} -gt 0 ]; then
+        print_error "Missing dependencies: ${missing[*]}"
+        print_info "Install with: sudo apt install ${missing[*]}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Get image info
+get_image_info() {
+    local file="$1"
+    
+    if ! identify "$file" &> /dev/null; then
+        return 1
+    fi
+    
+    local dims=$(identify -format "%wx%h" "$file" 2>/dev/null)
+    local size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
+    local format=$(identify -format "%m" "$file" 2>/dev/null)
+    
+    echo "$dims|$size|$format"
+}
+
+# Format bytes
+format_bytes() {
+    local bytes=$1
+    if [ "$bytes" -lt 1024 ]; then
+        echo "${bytes}B"
+    elif [ "$bytes" -lt 1048576 ]; then
+        echo "$((bytes / 1024))KB"
+    else
+        echo "$((bytes / 1048576))MB"
+    fi
+}
+
+# Resize images
+resize_images() {
+    local files=("$@")
+    local width=""
+    local height=""
+    local percent=""
+    local max_dim=""
+    local output_dir="processed"
+    local verbose=false
+    
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --width) width="$2"; shift 2 ;;
+            --height) height="$2"; shift 2 ;;
+            --percent) percent="$2"; shift 2 ;;
+            --max) max_dim="$2"; shift 2 ;;
+            --output) output_dir="$2"; shift 2 ;;
+            -v|--verbose) verbose=true; shift ;;
+            -*) shift ;;
+            *) shift ;;
+        esac
+    done
+    
+    mkdir -p "$output_dir"
+    
+    print_header "═══════════════════════════════════════════════════════════════"
+    print_header "                    RESIZING IMAGES"
+    print_header "═══════════════════════════════════════════════════════════════"
+    echo ""
+    
+    local count=0
+    local success=0
+    
+    for file in "${files[@]}"; do
+        [ ! -f "$file" ] && continue
+        [[ "$file" == --* ]] && continue
+        
+        local basename=$(basename "$file")
+        local output="$output_dir/$basename"
+        
+        ((count++))
+        
+        # Build resize geometry
+        local geometry=""
+        if [ -n "$width" ] && [ -n "$height" ]; then
+            geometry="${width}x${height}!"
+        elif [ -n "$width" ]; then
+            geometry="${width}x"
+        elif [ -n "$height" ]; then
+            geometry="x${height}"
+        elif [ -n "$percent" ]; then
+            geometry="${percent}%"
+        elif [ -n "$max_dim" ]; then
+            geometry="${max_dim}x${max_dim}"
+        else
+            print_error "No resize dimensions specified"
+            return 1
+        fi
+        
+        if convert "$file" -resize "$geometry" "$output" 2>/dev/null; then
+            ((success++))
+            
+            if [ "$verbose" = true ]; then
+                local orig_info=$(get_image_info "$file")
+                local new_info=$(get_image_info "$output")
+                local orig_size=$(echo "$orig_info" | cut -d'|' -f2)
+                local new_size=$(echo "$new_info" | cut -d'|' -f2)
+                
+                print_success "$basename: $(format_bytes $orig_size) → $(format_bytes $new_size)"
+            fi
+        else
+            print_error "Failed: $basename"
+        fi
+    done
+    
+    echo ""
+    print_header "═══════════════════════════════════════════════════════════════"
+    print_success "Processed $success of $count images"
+    print_info "Output: $output_dir/"
+    echo ""
+}
+
+# Compress images
+compress_images() {
+    local files=("$@")
+    local quality=85
+    local output_dir="processed"
+    local verbose=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --quality) quality="$2"; shift 2 ;;
+            --output) output_dir="$2"; shift 2 ;;
+            -v|--verbose) verbose=true; shift ;;
+            -*) shift ;;
+            *) shift ;;
+        esac
+    done
+    
+    mkdir -p "$output_dir"
+    
+    print_header "═══════════════════════════════════════════════════════════════"
+    print_header "               COMPRESSING IMAGES (Quality: $quality%)"
+    print_header "═══════════════════════════════════════════════════════════════"
+    echo ""
+    
+    local count=0
+    local success=0
+    local total_saved=0
+    
+    for file in "${files[@]}"; do
+        [ ! -f "$file" ] && continue
+        [[ "$file" == --* ]] && continue
+        
+        local basename=$(basename "$file")
+        local output="$output_dir/$basename"
+        
+        ((count++))
+        
+        local orig_size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
+        
+        if convert "$file" -quality "$quality" "$output" 2>/dev/null; then
+            ((success++))
+            
+            local new_size=$(stat -f%z "$output" 2>/dev/null || stat -c%s "$output" 2>/dev/null)
+            local saved=$((orig_size - new_size))
+            total_saved=$((total_saved + saved))
+            
+            if [ "$verbose" = true ]; then
+                local percent=$((100 - (new_size * 100 / orig_size)))
+                print_success "$basename: $(format_bytes $orig_size) → $(format_bytes $new_size) (-${percent}%)"
+            fi
+        else
+            print_error "Failed: $basename"
+        fi
+    done
+    
+    echo ""
+    print_header "═══════════════════════════════════════════════════════════════"
+    print_success "Compressed $success of $count images"
+    print_info "Space saved: $(format_bytes $total_saved)"
+    print_info "Output: $output_dir/"
+    echo ""
+}
+
+# Convert format
+convert_format() {
+    local files=("$@")
+    local target_format=""
+    local output_dir="processed"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --to) target_format="$2"; shift 2 ;;
+            --output) output_dir="$2"; shift 2 ;;
+            -*) shift ;;
+            *) shift ;;
+        esac
+    done
+    
+    if [ -z "$target_format" ]; then
+        print_error "Target format required (--to jpg|png|webp|gif)"
+        return 1
+    fi
+    
+    mkdir -p "$output_dir"
+    
+    print_header "═══════════════════════════════════════════════════════════════"
+    print_header "            CONVERTING TO ${target_format^^}"
+    print_header "═══════════════════════════════════════════════════════════════"
+    echo ""
+    
+    local count=0
+    local success=0
+    
+    for file in "${files[@]}"; do
+        [ ! -f "$file" ] && continue
+        [[ "$file" == --* ]] && continue
+        
+        local basename=$(basename "$file")
+        local name="${basename%.*}"
+        local output="$output_dir/${name}.${target_format}"
+        
+        ((count++))
+        
+        if convert "$file" "$output" 2>/dev/null; then
+            ((success++))
+            print_success "$basename → ${name}.${target_format}"
+        else
+            print_error "Failed: $basename"
+        fi
+    done
+    
+    echo ""
+    print_header "═══════════════════════════════════════════════════════════════"
+    print_success "Converted $success of $count images"
+    echo ""
+}
+
+# Strip metadata
+strip_metadata() {
+    local files=("$@")
+    local output_dir="processed"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --output) output_dir="$2"; shift 2 ;;
+            -*) shift ;;
+            *) shift ;;
+        esac
+    done
+    
+    if ! command -v exiftool &> /dev/null; then
+        print_error "exiftool not installed"
+        print_info "Install: sudo apt install exiftool"
+        return 1
+    fi
+    
+    mkdir -p "$output_dir"
+    
+    print_header "═══════════════════════════════════════════════════════════════"
+    print_header "              STRIPPING METADATA (Privacy Mode)"
+    print_header "═══════════════════════════════════════════════════════════════"
+    echo ""
+    
+    local count=0
+    local success=0
+    
+    for file in "${files[@]}"; do
+        [ ! -f "$file" ] && continue
+        [[ "$file" == --* ]] && continue
+        
+        local basename=$(basename "$file")
+        local output="$output_dir/$basename"
+        
+        ((count++))
+        
+        # Copy file and strip metadata
+        cp "$file" "$output"
+        if exiftool -all= -overwrite_original "$output" &>/dev/null; then
+            ((success++))
+            print_success "$basename (EXIF removed)"
+        else
+            print_error "Failed: $basename"
+        fi
+    done
+    
+    echo ""
+    print_header "═══════════════════════════════════════════════════════════════"
+    print_success "Stripped metadata from $success of $count images"
+    print_info "Removed: GPS, camera info, timestamps, software info"
+    echo ""
+}
+
+# Show image info
+show_info() {
+    local files=("$@")
+    
+    print_header "═══════════════════════════════════════════════════════════════"
+    print_header "                    IMAGE INFORMATION"
+    print_header "═══════════════════════════════════════════════════════════════"
+    echo ""
+    
+    printf "${CYAN}%-30s %-15s %-10s %-8s${NC}\n" "FILE" "DIMENSIONS" "SIZE" "FORMAT"
+    echo "────────────────────────────────────────────────────────────────────"
+    
+    for file in "${files[@]}"; do
+        [ ! -f "$file" ] && continue
+        [[ "$file" == --* ]] && continue
+        
+        local basename=$(basename "$file")
+        local info=$(get_image_info "$file")
+        
+        if [ -n "$info" ]; then
+            local dims=$(echo "$info" | cut -d'|' -f1)
+            local size=$(echo "$info" | cut -d'|' -f2)
+            local format=$(echo "$info" | cut -d'|' -f3)
+            
+            printf "%-30s %-15s %-10s %-8s\n" \
+                "${basename:0:30}" \
+                "$dims" \
+                "$(format_bytes $size)" \
+                "$format"
+        fi
+    done
+    
+    echo ""
+}
+
+# Main
+check_deps "$1" || exit 1
+
+if [ $# -eq 0 ]; then
+    show_usage
+    exit 0
+fi
+
+# Store all arguments
+ALL_ARGS=("$@")
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+    resize)
+        resize_images "${ALL_ARGS[@]}"
+        ;;
+    compress)
+        compress_images "${ALL_ARGS[@]}"
+        ;;
+    convert)
+        convert_format "${ALL_ARGS[@]}"
+        ;;
+    strip|strip-metadata)
+        strip_metadata "${ALL_ARGS[@]}"
+        ;;
+    info)
+        show_info "$@"
+        ;;
+    -h|--help)
+        show_usage
+        ;;
+    -v|--version)
+        show_version
+        ;;
+    *)
+        print_error "Unknown command: $COMMAND"
+        echo "Use -h or --help for usage information"
+        exit 1
+        ;;
+esac

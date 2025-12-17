@@ -1,0 +1,36 @@
+name: Test ImgBatch
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install ImageMagick
+      run: sudo apt-get update && sudo apt-get install -y imagemagick
+    
+    - name: Make executable
+      run: chmod +x imgbatch
+    
+    - name: Test help
+      run: ./imgbatch --help
+    
+    - name: Test version
+      run: ./imgbatch --version
+    
+    - name: Create test image
+      run: convert -size 100x100 xc:blue test.jpg
+    
+    - name: Test info command
+      run: ./imgbatch info test.jpg
+    
+    - name: Shellcheck
+      run: sudo apt-get install -y shellcheck && shellcheck imgbatch || true
+    
+    - name: Structure check
+      run: |
+        grep -q "resize_images()" imgbatch
+        grep -q "compress_images()" imgbatch
+        grep -q "convert_format()" imgbatch

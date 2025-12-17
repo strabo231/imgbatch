@@ -1,3 +1,5 @@
+[![Test ImgBatch](https://github.com/strabo231/imgbatch/actions/workflows/test.yml/badge.svg)](https://github.com/strabo231/imgbatch/actions/workflows/test.yml)
+
 # ImgBatch - Batch Image Processor
 
 Process hundreds of images in seconds! Resize, compress, convert, watermark - all from the command line.
